@@ -15,6 +15,8 @@ fn main()
 {
     let mut network = NeuralNet::create(&[2, 3, 3, 2], 0.0001);
 
+    let relu = |n: f64| n.max(0.0);
+
     let iterations = 10000;
 
     const PEAKS_AMOUNT: usize = 84;
@@ -23,11 +25,14 @@ fn main()
     let mut rng = rand::thread_rng();
     for i in 0..iterations
     {
-        //let input = (3.0, 3.2);
         let input = (rng.gen::<f64>()*5.0, rng.gen::<f64>()*5.0);
         let output = correct_outputs(input.clone());
 
+        let d_relu = |n: f64| if n > 0.0 {1.0} else {0.0};
+
         network.backpropagate(
+            relu,
+            d_relu,
             TrainSample
             {
                 inputs: vec![input.0, input.1],
@@ -36,7 +41,7 @@ fn main()
 
         let e = |v: f64, c: f64| (v-c).abs();
 
-        let out = network.feedforward(vec![input.0, input.1]);
+        let out = network.feedforward(relu, vec![input.0, input.1]);
 
         let err = e(out[0], output.0) + e(out[1], output.1);
 
@@ -76,5 +81,5 @@ fn main()
     let test = vec![3.0, 3.2];
 
     println!("correct: {:?}", correct_outputs((test[0], test[1])));
-    println!("network: {:?}", network.feedforward(test));
+    println!("network: {:?}", network.feedforward(relu, test));
 }

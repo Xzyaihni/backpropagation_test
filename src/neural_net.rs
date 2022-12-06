@@ -20,8 +20,8 @@ pub struct NeuralNet
     #[serde(skip)]
     neurons: Vec<Vec<f64>>,
 
+    biases: Vec<Vec<f64>>,
     weights: Vec<Vec<Vec<f64>>>,
-    biases: Vec<f64>,
     learning_rate: f64
 }
 
@@ -57,10 +57,10 @@ impl NeuralNet
             weights.push(n_weights);
         }
 
-        let biases = neurons.iter().skip(1).map(|_|
+        let biases = neurons.iter().skip(1).map(|v|
         {
-            rng.gen::<f64>()*2.0-1.0
-        }).collect::<Vec<f64>>();
+            v.iter().map(|_| rng.gen::<f64>()*2.0-1.0).collect::<Vec<f64>>()
+        }).collect::<Vec<Vec<f64>>>();
 
         NeuralNet{neurons, weights, biases, learning_rate}
     }
@@ -76,19 +76,56 @@ impl NeuralNet
         ciborium::ser::into_writer(&self, File::create(filename)
             .map_err(|err| ciborium::ser::Error::Io(err))?)
     }
+}
 
-    pub fn backpropagate(&mut self, sample: TrainSample)
+impl NeuralNet
+{
+    pub fn feedforward<'a, T>(
+        &'a mut self,
+        transfer_function: T,
+        inputs: Vec<f64>
+    ) -> &'a Vec<f64>
+    where
+        T: Fn(f64)->f64
+    {
+        self.neurons[0] = inputs;
+
+        for layer in 1..self.neurons.len()
+        {
+            for neuron in 0..self.neurons[layer].len()
+            {
+                self.neurons[layer][neuron] = self.neurons[layer-1].iter()
+                    .zip(self.weights[layer-1][neuron].iter())
+                    .map(|(previous, weight)|
+                    {
+                        transfer_function(*previous) * *weight
+                    }).sum::<f64>() + self.biases[layer-1][neuron];
+            }
+        }
+
+        self.neurons.last().unwrap()
+    }
+
+    pub fn backpropagate<T, DT>(
+        &mut self,
+        transfer_function: T,
+        d_transfer_function: DT,
+        sample: TrainSample
+    )
+    where
+        T: Fn(f64)->f64,
+        DT: Fn(f64)->f64
     {
         assert!(self.neurons.len()>1);
 
         let TrainSample{inputs, outputs: correct_outputs} = sample;
-        self.feedforward(inputs);
+        self.feedforward(transfer_function, inputs);
 
-        let outputs = self.derive_outputs(correct_outputs);
-        self.derive_hidden(outputs);
+        let outputs = self.derive_outputs(&d_transfer_function, correct_outputs);
+        self.derive_hidden(d_transfer_function, outputs);
     }
 
-    fn derive_outputs(&mut self, correct_outputs: Vec<f64>) -> Vec<f64>
+    fn derive_outputs(&mut self, t_f: impl Fn(f64)->f64, correct_outputs: Vec<f64>) -> Vec<f64>
     {
         let last_layer = self.neurons.len()-1;
         let before_last = last_layer-1;
@@ -98,26 +135,25 @@ impl NeuralNet
         self.neurons[last_layer].iter().enumerate()
             .for_each(|(i_current, neuron)|
             {
-                if *neuron > 0.0
-                {
-                    self.neurons[before_last].iter().enumerate()
-                        .for_each(|(i_previous, previous_neuron)|
-                        {
-                            let error = neuron.max(0.0) - correct_outputs[i_current];
-                            let deriv = error * previous_neuron.max(0.0);
+                let t_deriv = t_f(*neuron);
 
-                            out_derivatives[i_current] += error;
-                            self.biases[before_last] -= error * self.learning_rate;
-                            self.weights[before_last][i_current][i_previous] -=
-                                deriv * self.learning_rate;
-                        });
-                }
+                self.neurons[before_last].iter().enumerate()
+                    .for_each(|(i_previous, previous_neuron)|
+                    {
+                        let error = neuron.max(0.0) - correct_outputs[i_current] * t_deriv;
+                        let deriv = error * previous_neuron.max(0.0);
+
+                        out_derivatives[i_current] += error;
+                        self.biases[before_last][i_current] -= error * self.learning_rate;
+                        self.weights[before_last][i_current][i_previous] -=
+                            deriv * self.learning_rate;
+                    });
             });
 
         out_derivatives
     }
 
-    fn derive_hidden(&mut self, mut next_derivatives: Vec<f64>)
+    fn derive_hidden(&mut self, t_f: impl Fn(f64)->f64, mut next_derivatives: Vec<f64>)
     {
         let mut neurons = self.neurons.iter().enumerate();
         neurons.next();
@@ -128,48 +164,28 @@ impl NeuralNet
             neuron_layer.iter().enumerate()
                 .for_each(|(i_current, neuron)|
                 {
-                    if *neuron > 0.0
-                    {
-                        self.neurons[layer-1].iter().enumerate()
-                            .for_each(|(i_previous, previous_neuron)|
-                            {
-                        let p_deriv = self.neurons[layer+1].iter().enumerate()
-                            .map(|(i_next, _)|
-                            {
-                                self.weights[layer][i_next][i_current] * next_derivatives[i_next]
-                            }).sum::<f64>();
+                    let t_deriv = t_f(*neuron);
 
-                        new_derivatives[i_current] += p_deriv;
+                    self.neurons[layer-1].iter().enumerate()
+                        .for_each(|(i_previous, previous_neuron)|
+                        {
+                            let p_deriv = next_derivatives.iter().enumerate()
+                                .map(|(i_next, next_derivative)|
+                                {
+                                    self.weights[layer][i_next][i_current] * next_derivative
+                                }).sum::<f64>() * t_deriv;
 
-                        let deriv = p_deriv * *previous_neuron;
+                            new_derivatives[i_current] += p_deriv;
 
-                        self.biases[layer-1] -= p_deriv * self.learning_rate;
-                        self.weights[layer-1][i_current][i_previous] -=
-                            deriv * self.learning_rate;
-                            });
-                    }
+                            let deriv = p_deriv * *previous_neuron;
+
+                            self.biases[layer-1][i_current] -= p_deriv * self.learning_rate;
+                            self.weights[layer-1][i_current][i_previous] -=
+                                deriv * self.learning_rate;
+                        });
                 });
 
             next_derivatives = new_derivatives;
         });
-    }
-
-    pub fn feedforward<'a>(&'a mut self, inputs: Vec<f64>) -> &'a Vec<f64>
-    {
-        self.neurons[0] = inputs;
-
-        for layer in 0..self.neurons.len()-1
-        {
-            for neuron in 0..self.neurons[layer+1].len()
-            {
-                self.neurons[layer+1][neuron] = self.neurons[layer].iter()
-                    .zip(self.weights[layer][neuron].iter()).map(|(previous, weight)|
-                    {
-                        previous.max(0.0) * *weight
-                    }).sum::<f64>() + self.biases[layer];
-            }
-        }
-
-        self.neurons.last().unwrap()
     }
 }
