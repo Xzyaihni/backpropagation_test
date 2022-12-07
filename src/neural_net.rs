@@ -8,7 +8,7 @@ use serde::{Serialize, Deserialize};
 use rand::Rng;
 
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TransferFunction
 {
     Relu,
@@ -43,7 +43,7 @@ pub struct TrainSample
     pub outputs: Vec<f64>
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NeuralNet
 {
     #[serde(skip)]
@@ -103,8 +103,17 @@ impl NeuralNet
 
     pub fn load(filename: &str) -> Result<Self, ciborium::de::Error<io::Error>>
     {
-        ciborium::de::from_reader::<Self, _>(File::open(filename)
-            .map_err(|err| ciborium::de::Error::Io(err))?)
+        let mut network = ciborium::de::from_reader::<Self, _>(File::open(filename)
+            .map_err(|err| ciborium::de::Error::Io(err))?)?;
+
+        let mut neurons = network.weights.iter().map(|w| vec![0.0; w[0].len()])
+            .collect::<Vec<Vec<f64>>>();
+
+        neurons.push(vec![0.0; network.weights.last().unwrap().len()]);
+
+        network.neurons = neurons;
+
+        Ok(network)
     }
 
     pub fn save(&self, filename: &str) -> Result<(), ciborium::ser::Error<io::Error>>
