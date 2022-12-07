@@ -8,6 +8,35 @@ use serde::{Serialize, Deserialize};
 use rand::Rng;
 
 
+#[derive(Debug, Serialize, Deserialize)]
+pub enum TransferFunction
+{
+    Relu,
+    Sigmoid
+}
+
+impl TransferFunction
+{
+    pub fn t_f(&self, n: f64) -> f64
+    {
+        match self
+        {
+            TransferFunction::Relu => n.max(0.0),
+            TransferFunction::Sigmoid => 0.5 + 0.5 * (n/2.0).tanh()
+        }
+    }
+
+    //dtf? funy
+    pub fn dt_f(&self, n: f64) -> f64
+    {
+        match self
+        {
+            TransferFunction::Relu => if n>0.0 {1.0} else {0.0},
+            TransferFunction::Sigmoid => (0.5 + 0.5 * (n/2.0).tanh()) * (0.5 - 0.5 * (n/2.0).tanh())
+        }
+    }
+}
+
 pub struct TrainSample
 {
     pub inputs: Vec<f64>,
@@ -22,13 +51,20 @@ pub struct NeuralNet
 
     biases: Vec<Vec<f64>>,
     weights: Vec<Vec<Vec<f64>>>,
+
+    transfer_function: TransferFunction,
+
     learning_rate: f64
 }
 
 #[allow(dead_code)]
 impl NeuralNet
 {
-    pub fn create(layers: &[usize], learning_rate: f64) -> Self
+    pub fn create(
+        layers: &[usize],
+        transfer_function: TransferFunction,
+        learning_rate: f64
+    ) -> Self
     {
         let mut neurons = Vec::new();
         for &layer in layers
@@ -62,7 +98,7 @@ impl NeuralNet
             v.iter().map(|_| rng.gen::<f64>()*2.0-1.0).collect::<Vec<f64>>()
         }).collect::<Vec<Vec<f64>>>();
 
-        NeuralNet{neurons, weights, biases, learning_rate}
+        NeuralNet{neurons, weights, biases, transfer_function, learning_rate}
     }
 
     pub fn load(filename: &str) -> Result<Self, ciborium::de::Error<io::Error>>
@@ -76,17 +112,8 @@ impl NeuralNet
         ciborium::ser::into_writer(&self, File::create(filename)
             .map_err(|err| ciborium::ser::Error::Io(err))?)
     }
-}
 
-impl NeuralNet
-{
-    pub fn feedforward<'a, T>(
-        &'a mut self,
-        transfer_function: T,
-        inputs: Vec<f64>
-    ) -> &'a Vec<f64>
-    where
-        T: Fn(f64)->f64
+    pub fn feedforward<'a>(&'a mut self, inputs: Vec<f64>) -> &'a Vec<f64>
     {
         self.neurons[0] = inputs;
 
@@ -98,7 +125,7 @@ impl NeuralNet
                     .zip(self.weights[layer-1][neuron].iter())
                     .map(|(previous, weight)|
                     {
-                        transfer_function(*previous) * *weight
+                        self.transfer_function.t_f(*previous) * *weight
                     }).sum::<f64>() + self.biases[layer-1][neuron];
             }
         }
@@ -106,26 +133,18 @@ impl NeuralNet
         self.neurons.last().unwrap()
     }
 
-    pub fn backpropagate<T, DT>(
-        &mut self,
-        transfer_function: T,
-        d_transfer_function: DT,
-        sample: TrainSample
-    )
-    where
-        T: Fn(f64)->f64,
-        DT: Fn(f64)->f64
+    pub fn backpropagate(&mut self,sample: TrainSample)
     {
         assert!(self.neurons.len()>1);
 
         let TrainSample{inputs, outputs: correct_outputs} = sample;
-        self.feedforward(transfer_function, inputs);
+        self.feedforward(inputs);
 
-        let outputs = self.derive_outputs(&d_transfer_function, correct_outputs);
-        self.derive_hidden(d_transfer_function, outputs);
+        let outputs = self.derive_outputs(correct_outputs);
+        self.derive_hidden(outputs);
     }
 
-    fn derive_outputs(&mut self, t_f: impl Fn(f64)->f64, correct_outputs: Vec<f64>) -> Vec<f64>
+    fn derive_outputs(&mut self, correct_outputs: Vec<f64>) -> Vec<f64>
     {
         let last_layer = self.neurons.len()-1;
         let before_last = last_layer-1;
@@ -135,7 +154,7 @@ impl NeuralNet
         self.neurons[last_layer].iter().enumerate()
             .for_each(|(i_current, neuron)|
             {
-                let t_deriv = t_f(*neuron);
+                let t_deriv = self.transfer_function.dt_f(*neuron);
 
                 self.neurons[before_last].iter().enumerate()
                     .for_each(|(i_previous, previous_neuron)|
@@ -153,7 +172,7 @@ impl NeuralNet
         out_derivatives
     }
 
-    fn derive_hidden(&mut self, t_f: impl Fn(f64)->f64, mut next_derivatives: Vec<f64>)
+    fn derive_hidden(&mut self, mut next_derivatives: Vec<f64>)
     {
         let mut neurons = self.neurons.iter().enumerate();
         neurons.next();
@@ -164,7 +183,7 @@ impl NeuralNet
             neuron_layer.iter().enumerate()
                 .for_each(|(i_current, neuron)|
                 {
-                    let t_deriv = t_f(*neuron);
+                    let t_deriv = self.transfer_function.dt_f(*neuron);
 
                     self.neurons[layer-1].iter().enumerate()
                         .for_each(|(i_previous, previous_neuron)|
