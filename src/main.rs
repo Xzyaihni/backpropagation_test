@@ -8,14 +8,14 @@ mod neural_net;
 
 fn correct_outputs(inputs: (f64, f64)) -> (f64, f64)
 {
-    (inputs.1 * 2.0 + 1.0, inputs.0 * 2.0 + 3.0)
+    (inputs.1 * 0.3 - 0.1, inputs.0 * 0.5 + 0.1)
 }
 
 fn main()
 {
-    let mut network = NeuralNet::create(&[2, 3, 3, 2], TransferFunction::Relu, 0.0001);
+    let mut network = NeuralNet::create(&[2, 3, 3, 2], TransferFunction::Sigmoid, 0.001);
 
-    let iterations = 1000000;
+    let iterations = 100000;
 
     const PEAKS_AMOUNT: usize = 84;
     let mut peaks = [0.0;PEAKS_AMOUNT];
@@ -23,17 +23,17 @@ fn main()
     let mut rng = rand::thread_rng();
     for i in 0..iterations
     {
-        let input = (rng.gen::<f64>()*5.0, rng.gen::<f64>()*5.0);
+        let input = (rng.gen::<f64>(), rng.gen::<f64>());
         let output = correct_outputs(input.clone());
 
-        network.backpropagate(TrainSample{
+        network.backpropagate(&[TrainSample{
                 inputs: vec![input.0, input.1],
                 outputs: vec![output.0, output.1]
-            });
+            }]);
 
         let e = |v: f64, c: f64| (v-c).abs();
 
-        let out = network.feedforward(vec![input.0, input.1]);
+        let out = network.feedforward(&[input.0, input.1]);
 
         let err = e(out[0], output.0) + e(out[1], output.1);
 
@@ -70,8 +70,8 @@ fn main()
         }
     }
 
-    let test = vec![3.0, 3.2];
+    let test = vec![0.5, 0.7];
 
     println!("correct: {:?}", correct_outputs((test[0], test[1])));
-    println!("network: {:?}", network.feedforward(test));
+    println!("network: {:?}", network.feedforward(&test));
 }

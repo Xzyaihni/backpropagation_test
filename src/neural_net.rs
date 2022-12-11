@@ -32,7 +32,10 @@ impl TransferFunction
         match self
         {
             TransferFunction::Relu => if n>0.0 {1.0} else {0.0},
-            TransferFunction::Sigmoid => (0.5 + 0.5 * (n/2.0).tanh()) * (0.5 - 0.5 * (n/2.0).tanh())
+            TransferFunction::Sigmoid =>
+            {
+                0.25 - 0.25 * (n/2.0).tanh() * (n/2.0).tanh()
+            }
         }
     }
 }
@@ -46,15 +49,23 @@ pub struct TrainSample
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NeuralNet
 {
+    layers: Vec<usize>,
     #[serde(skip)]
     neurons: Vec<Vec<f64>>,
 
-    biases: Vec<Vec<f64>>,
+    #[serde(skip)]
+    gradient_batch: Vec<Vec<Vec<f64>>>,
     weights: Vec<Vec<Vec<f64>>>,
 
     transfer_function: TransferFunction,
 
     learning_rate: f64
+}
+
+struct DefaultFields
+{
+    neurons: Vec<Vec<f64>>,
+    gradient_batch: Vec<Vec<Vec<f64>>>
 }
 
 #[allow(dead_code)]
@@ -66,54 +77,52 @@ impl NeuralNet
         learning_rate: f64
     ) -> Self
     {
-        let mut neurons = Vec::new();
-        for &layer in layers
-        {
-            neurons.push(vec![0.0;layer]);
-        }
+        let DefaultFields{neurons, gradient_batch} = Self::initialize_defaults(layers);
 
         let mut rng = rand::thread_rng();
-
-        let mut weights = Vec::new();
-
-        for layer in 0..layers.len().checked_sub(1).expect("layers mustn't be empty")
+        let weights = gradient_batch.iter().map(|layer|
         {
-            let mut n_weights = Vec::new();
-            for _ in 0..layers[layer+1]
+            layer.iter().map(|w|
             {
-                let mut weights = Vec::new();
-                for _ in 0..layers[layer]
-                {
-                    weights.push(rng.gen());
-                }
+                w.iter().map(|_| rng.gen::<f64>() * 2.0 - 1.0).collect::<Vec<f64>>()
+            }).collect::<Vec<Vec<f64>>>()
+        }).collect::<Vec<Vec<Vec<f64>>>>();
 
-                n_weights.push(weights);
-            }
-
-            weights.push(n_weights);
+        NeuralNet{
+            layers: layers.to_vec(),
+            neurons,
+            gradient_batch, weights,
+            transfer_function, learning_rate
         }
+    }
 
-        let biases = neurons.iter().skip(1).map(|v|
+    fn initialize_defaults(layers: &[usize]) -> DefaultFields
+    {
+        assert!(layers.len()>1);
+
+        let neurons = layers.iter().skip(1).map(|layer| vec![0.0; *layer])
+            .collect::<Vec<Vec<f64>>>();
+
+        let gradient_batch = (1..layers.len()).map(|layer|
         {
-            v.iter().map(|_| rng.gen::<f64>()*2.0-1.0).collect::<Vec<f64>>()
-        }).collect::<Vec<Vec<f64>>>();
+            (0..layers[layer]).map(|_|
+            {
+                vec![0.0; layers[layer-1]+1]
+            }).collect::<Vec<Vec<f64>>>()
+        }).collect::<Vec<Vec<Vec<f64>>>>();
 
-        NeuralNet{neurons, weights, biases, transfer_function, learning_rate}
+        DefaultFields{neurons, gradient_batch}
     }
 
     pub fn load(filename: &str) -> Result<Self, ciborium::de::Error<io::Error>>
     {
-        let mut network = ciborium::de::from_reader::<Self, _>(File::open(filename)
+        let mut net = ciborium::de::from_reader::<Self, _>(File::open(filename)
             .map_err(|err| ciborium::de::Error::Io(err))?)?;
 
-        let mut neurons = network.weights.iter().map(|w| vec![0.0; w[0].len()])
-            .collect::<Vec<Vec<f64>>>();
+        DefaultFields{neurons: net.neurons, gradient_batch: net.gradient_batch} =
+            Self::initialize_defaults(&net.layers);
 
-        neurons.push(vec![0.0; network.weights.last().unwrap().len()]);
-
-        network.neurons = neurons;
-
-        Ok(network)
+        Ok(net)
     }
 
     pub fn save(&self, filename: &str) -> Result<(), ciborium::ser::Error<io::Error>>
@@ -122,98 +131,135 @@ impl NeuralNet
             .map_err(|err| ciborium::ser::Error::Io(err))?)
     }
 
-    pub fn feedforward<'a>(&'a mut self, inputs: Vec<f64>) -> &'a Vec<f64>
+    pub fn feedforward(&mut self, inputs: &[f64]) -> Vec<f64>
     {
-        self.neurons[0] = inputs;
+        self.feedforward_inner(inputs);
 
-        for layer in 1..self.neurons.len()
+        self.neurons.last().unwrap().iter().map(|neuron|
         {
-            for neuron in 0..self.neurons[layer].len()
+            self.transfer_function.t_f(*neuron)
+        }).collect::<Vec<f64>>()
+    }
+
+    fn feedforward_inner(&mut self, inputs: &[f64])
+    {
+        unsafe
+        {
+        for layer in 0..self.layers.len()-1
+        {
+            let next_layer_len = self.layers.get_unchecked(layer+1);
+            for i_neuron in 0..*next_layer_len
             {
-                self.neurons[layer][neuron] = self.neurons[layer-1].iter()
-                    .zip(self.weights[layer-1][neuron].iter())
-                    .map(|(previous, weight)|
-                    {
-                        self.transfer_function.t_f(*previous) * *weight
-                    }).sum::<f64>() + self.biases[layer-1][neuron];
+                let neuron_weights = self.weights.get_unchecked(layer)
+                    .get_unchecked(i_neuron);
+
+                let bias = neuron_weights.get_unchecked(*next_layer_len);
+
+                self.neurons[layer][i_neuron] =
+                    (0..neuron_weights.len()-1)
+                        .map(|i_previous|
+                        {
+                            let neuron = if layer==0
+                                {
+                                    *inputs.get_unchecked(i_previous)
+                                } else
+                                {
+                                    self.transfer_function.t_f(*self.neurons
+                                        .get_unchecked(layer-1)
+                                        .get_unchecked(i_previous))
+                                };
+
+                            neuron_weights.get_unchecked(i_previous) * neuron
+                        }).sum::<f64>() + bias;
             }
         }
-
-        self.neurons.last().unwrap()
+        }
     }
 
-    pub fn backpropagate(&mut self,sample: TrainSample)
+    pub fn backpropagate(&mut self, samples: &[TrainSample])
     {
-        assert!(self.neurons.len()>1);
-
-        let TrainSample{inputs, outputs: correct_outputs} = sample;
-        self.feedforward(inputs);
-
-        let outputs = self.derive_outputs(correct_outputs);
-        self.derive_hidden(outputs);
-    }
-
-    fn derive_outputs(&mut self, correct_outputs: Vec<f64>) -> Vec<f64>
-    {
-        let last_layer = self.neurons.len()-1;
-        let before_last = last_layer-1;
-
-        let mut out_derivatives = vec![0.0; correct_outputs.len()];
-
-        self.neurons[last_layer].iter().enumerate()
-            .for_each(|(i_current, neuron)|
-            {
-                let t_deriv = self.transfer_function.dt_f(*neuron);
-
-                self.neurons[before_last].iter().enumerate()
-                    .for_each(|(i_previous, previous_neuron)|
-                    {
-                        let error = neuron.max(0.0) - correct_outputs[i_current] * t_deriv;
-                        let deriv = error * previous_neuron.max(0.0);
-
-                        out_derivatives[i_current] += error;
-                        self.biases[before_last][i_current] -= error * self.learning_rate;
-                        self.weights[before_last][i_current][i_previous] -=
-                            deriv * self.learning_rate;
-                    });
-            });
-
-        out_derivatives
-    }
-
-    fn derive_hidden(&mut self, mut next_derivatives: Vec<f64>)
-    {
-        let mut neurons = self.neurons.iter().enumerate();
-        neurons.next();
-
-        neurons.rev().skip(1).for_each(|(layer, neuron_layer)|
+        for sample in samples
         {
-            let mut new_derivatives = vec![0.0; neuron_layer.len()];
-            neuron_layer.iter().enumerate()
-                .for_each(|(i_current, neuron)|
+            self.feedforward_inner(&sample.inputs);
+            self.backpropagate_inner(&sample.outputs);
+        }
+
+        unsafe
+        {
+        for layer in 0..self.layers.len()-1
+        {
+            for neuron in 0..*self.layers.get_unchecked(layer+1)
+            {
+
+                self.gradient_batch.get_unchecked_mut(layer)
+                    .get_unchecked_mut(neuron).iter_mut().enumerate()
+                    .for_each(|(previous, gradient)|
+                    {
+                        *self.weights.get_unchecked_mut(layer)
+                            .get_unchecked_mut(neuron)
+                            .get_unchecked_mut(previous) -=
+                            *gradient * self.learning_rate;
+
+                        *gradient = 0.0;
+                    });
+            }
+        }
+        }
+    }
+
+    fn backpropagate_inner(&mut self, outputs: &[f64])
+    {
+        //yolo
+        unsafe
+        {
+        for layer in (0..self.layers.len()-1).rev()
+        {
+            for i_neuron in 0..*self.layers.get_unchecked(layer+1)
+            {
+                let neuron = self.neurons.get_unchecked(layer).get_unchecked(i_neuron);
+
+                let error = if layer==self.layers.len()-2
                 {
-                    let t_deriv = self.transfer_function.dt_f(*neuron);
+                    self.transfer_function.t_f(*neuron) - outputs.get_unchecked(i_neuron)
+                } else
+                {
+                    (0..*self.layers.get_unchecked(layer+2)).map(|i_next|
+                    {
+                        self.weights.get_unchecked(layer)
+                            .get_unchecked(i_next)
+                            .get_unchecked(i_neuron)
+                            * self.neurons.get_unchecked(layer+1).get_unchecked(i_next)
+                    }).sum()
+                };
 
-                    self.neurons[layer-1].iter().enumerate()
-                        .for_each(|(i_previous, previous_neuron)|
-                        {
-                            let p_deriv = next_derivatives.iter().enumerate()
-                                .map(|(i_next, next_derivative)|
-                                {
-                                    self.weights[layer][i_next][i_current] * next_derivative
-                                }).sum::<f64>() * t_deriv;
+                let d_transfer = self.transfer_function.dt_f(*neuron);
+                let deriv = error * d_transfer;
 
-                            new_derivatives[i_current] += p_deriv;
+                *self.neurons.get_unchecked_mut(layer).get_unchecked_mut(i_neuron) = deriv;
 
-                            let deriv = p_deriv * *previous_neuron;
+                let neuron_gradient = self.gradient_batch
+                    .get_unchecked_mut(layer)
+                    .get_unchecked_mut(i_neuron);
 
-                            self.biases[layer-1][i_current] -= p_deriv * self.learning_rate;
-                            self.weights[layer-1][i_current][i_previous] -=
-                                deriv * self.learning_rate;
-                        });
+                (0..neuron_gradient.len()-1).for_each(|i_previous|
+                {
+                    let gradient = deriv * if layer>0
+                    {
+                        self.transfer_function.t_f(*self.neurons
+                            .get_unchecked(layer-1)
+                            .get_unchecked(i_previous))
+                    } else
+                    {
+                        1.0
+                    };
+
+                    *neuron_gradient.get_unchecked_mut(i_previous) += gradient;
                 });
 
-            next_derivatives = new_derivatives;
-        });
+                //bias gradient
+                *neuron_gradient.last_mut().unwrap() = deriv;
+            }
+        }
+        }
     }
 }
