@@ -22,7 +22,7 @@ impl TransferFunction
         match self
         {
             TransferFunction::Relu => n.max(0.0),
-            TransferFunction::Sigmoid => 0.5 + 0.5 * (n/2.0).tanh()
+            TransferFunction::Sigmoid => 0.5 + 0.5 * (0.5*n).tanh()
         }
     }
 
@@ -34,7 +34,7 @@ impl TransferFunction
             TransferFunction::Relu => if n>0.0 {1.0} else {0.0},
             TransferFunction::Sigmoid =>
             {
-                0.25 - 0.25 * (n/2.0).tanh() * (n/2.0).tanh()
+                0.25 - 0.25 * (0.5*n).tanh().powi(2)
             }
         }
     }
@@ -147,16 +147,15 @@ impl NeuralNet
         {
         for layer in 0..self.layers.len()-1
         {
-            let next_layer_len = self.layers.get_unchecked(layer+1);
-            for i_neuron in 0..*next_layer_len
+            for i_neuron in 0..*self.layers.get_unchecked(layer+1)
             {
                 let neuron_weights = self.weights.get_unchecked(layer)
                     .get_unchecked(i_neuron);
 
-                let bias = neuron_weights.get_unchecked(*next_layer_len);
+                let bias = neuron_weights.get_unchecked(*self.layers.get_unchecked(layer));
 
                 self.neurons[layer][i_neuron] =
-                    (0..neuron_weights.len()-1)
+                    (0..*self.layers.get_unchecked(layer))
                         .map(|i_previous|
                         {
                             let neuron = if layer==0
@@ -181,7 +180,7 @@ impl NeuralNet
         for sample in samples
         {
             self.feedforward_inner(&sample.inputs);
-            self.backpropagate_inner(&sample.outputs);
+            self.backpropagate_inner(&sample.inputs, &sample.outputs);
         }
 
         unsafe
@@ -190,7 +189,6 @@ impl NeuralNet
         {
             for neuron in 0..*self.layers.get_unchecked(layer+1)
             {
-
                 self.gradient_batch.get_unchecked_mut(layer)
                     .get_unchecked_mut(neuron).iter_mut().enumerate()
                     .for_each(|(previous, gradient)|
@@ -199,15 +197,13 @@ impl NeuralNet
                             .get_unchecked_mut(neuron)
                             .get_unchecked_mut(previous) -=
                             *gradient * self.learning_rate;
-
-                        *gradient = 0.0;
                     });
             }
         }
         }
     }
 
-    fn backpropagate_inner(&mut self, outputs: &[f64])
+    fn backpropagate_inner(&mut self, inputs: &[f64], outputs: &[f64])
     {
         //yolo
         unsafe
@@ -220,12 +216,18 @@ impl NeuralNet
 
                 let error = if layer==self.layers.len()-2
                 {
-                    self.transfer_function.t_f(*neuron) - outputs.get_unchecked(i_neuron)
+                    if cfg!(not(test))
+                    {
+                        self.transfer_function.t_f(*neuron) - outputs.get_unchecked(i_neuron)
+                    } else
+                    {
+                        1.0
+                    }
                 } else
                 {
                     (0..*self.layers.get_unchecked(layer+2)).map(|i_next|
                     {
-                        self.weights.get_unchecked(layer)
+                        self.weights.get_unchecked(layer+1)
                             .get_unchecked(i_next)
                             .get_unchecked(i_neuron)
                             * self.neurons.get_unchecked(layer+1).get_unchecked(i_next)
@@ -235,31 +237,103 @@ impl NeuralNet
                 let d_transfer = self.transfer_function.dt_f(*neuron);
                 let deriv = error * d_transfer;
 
-                *self.neurons.get_unchecked_mut(layer).get_unchecked_mut(i_neuron) = deriv;
-
                 let neuron_gradient = self.gradient_batch
                     .get_unchecked_mut(layer)
                     .get_unchecked_mut(i_neuron);
 
-                (0..neuron_gradient.len()-1).for_each(|i_previous|
+                for i_previous in 0..*self.layers.get_unchecked(layer)
                 {
-                    let gradient = deriv * if layer>0
+                    let previous = if layer>0
                     {
                         self.transfer_function.t_f(*self.neurons
                             .get_unchecked(layer-1)
                             .get_unchecked(i_previous))
                     } else
                     {
-                        1.0
+                        *inputs.get_unchecked(i_previous)
                     };
 
-                    *neuron_gradient.get_unchecked_mut(i_previous) += gradient;
-                });
+                    *neuron_gradient.get_unchecked_mut(i_previous) = deriv * previous;
+                }
 
                 //bias gradient
                 *neuron_gradient.last_mut().unwrap() = deriv;
+
+                //for previous layer's gradient calculation (current gradient)
+                *self.neurons.get_unchecked_mut(layer).get_unchecked_mut(i_neuron) = deriv;
             }
         }
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod tests
+{
+    use super::*;
+
+    #[test]
+    fn backprop()
+    {
+        for _ in 0..10
+        {
+            backprop_single();
+        }
+    }
+
+    fn backprop_single()
+    {
+        let mut rng = rand::thread_rng();
+        let layers = [2, rng.gen_range(1..10), rng.gen_range(1..10), rng.gen_range(1..10), 2];
+
+        let mut network = NeuralNet::create(
+            &layers,
+            TransferFunction::Sigmoid,
+            1.0
+        );
+
+        let change = 0.2;
+
+        for t_l in 0..layers.len()-1
+        {
+            for t_n in 0..layers[t_l+1]
+            {
+                for t_b in 0..(layers[t_l]+1)
+                {
+                    let test_input = (0..layers[0]).map(|_| rng.gen())
+                        .collect::<Vec<f64>>();
+
+                    //doesnt matter
+                    let test_output = (0..*layers.last().unwrap()).map(|_| 0.0)
+                        .collect::<Vec<f64>>();
+
+
+                    let normal_weight = network.weights[t_l][t_n][t_b];
+
+                    network.weights[t_l][t_n][t_b] = normal_weight + change;
+                    let output = network.feedforward(&test_input);
+                    let left = output.into_iter().sum::<f64>();
+
+                    network.weights[t_l][t_n][t_b] = normal_weight - change;
+                    let output = network.feedforward(&test_input);
+                    let right = output.into_iter().sum::<f64>();
+
+                    network.weights[t_l][t_n][t_b] = normal_weight;
+
+                    network.feedforward_inner(&test_input);
+                    network.backpropagate_inner(&test_input, &test_output);
+
+                    let deriv = network.gradient_batch[t_l][t_n][t_b];
+                    let real_deriv = (left - right) / (2.0 * change);
+
+                    print!("(layer: {t_l} neuron: {t_n} previous: {t_b})  ");
+                    println!("backprop: {deriv}, derivative: {real_deriv}");
+                    println!("diff: {}", deriv-real_deriv);
+
+                    assert!((deriv-real_deriv).abs()<0.001);
+                }
+            }
         }
     }
 }
