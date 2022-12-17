@@ -13,9 +13,9 @@ fn correct_outputs(inputs: (f64, f64)) -> (f64, f64)
 
 fn main()
 {
-    let mut network = NeuralNet::create(&[2, 3, 3, 2], TransferFunction::Sigmoid, 0.001);
+    let mut network = NeuralNet::create(&[2, 2, 2], TransferFunction::Sigmoid, 0.001, 0.2);
 
-    let iterations = 100000;
+    let iterations = 10000;
 
     const PEAKS_AMOUNT: usize = 84;
     let mut peaks = [0.0;PEAKS_AMOUNT];

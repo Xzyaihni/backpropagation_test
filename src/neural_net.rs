@@ -54,17 +54,21 @@ pub struct NeuralNet
     neurons: Vec<Vec<f64>>,
 
     #[serde(skip)]
+    previous_gradient: Vec<Vec<Vec<f64>>>,
+    #[serde(skip)]
     gradient_batch: Vec<Vec<Vec<f64>>>,
     weights: Vec<Vec<Vec<f64>>>,
 
     transfer_function: TransferFunction,
 
-    learning_rate: f64
+    learning_rate: f64,
+    momentum: f64
 }
 
 struct DefaultFields
 {
     neurons: Vec<Vec<f64>>,
+    previous_gradient: Vec<Vec<Vec<f64>>>,
     gradient_batch: Vec<Vec<Vec<f64>>>
 }
 
@@ -74,10 +78,12 @@ impl NeuralNet
     pub fn create(
         layers: &[usize],
         transfer_function: TransferFunction,
-        learning_rate: f64
+        learning_rate: f64,
+        momentum: f64
     ) -> Self
     {
-        let DefaultFields{neurons, gradient_batch} = Self::initialize_defaults(layers);
+        let DefaultFields{neurons, previous_gradient, gradient_batch} =
+            Self::initialize_defaults(layers);
 
         let mut rng = rand::thread_rng();
         let weights = gradient_batch.iter().map(|layer|
@@ -91,8 +97,10 @@ impl NeuralNet
         NeuralNet{
             layers: layers.to_vec(),
             neurons,
-            gradient_batch, weights,
-            transfer_function, learning_rate
+            previous_gradient, gradient_batch,
+            weights,
+            transfer_function,
+            learning_rate, momentum
         }
     }
 
@@ -111,7 +119,9 @@ impl NeuralNet
             }).collect::<Vec<Vec<f64>>>()
         }).collect::<Vec<Vec<Vec<f64>>>>();
 
-        DefaultFields{neurons, gradient_batch}
+        let previous_gradient = gradient_batch.clone();
+
+        DefaultFields{neurons, previous_gradient, gradient_batch}
     }
 
     pub fn load(filename: &str) -> Result<Self, ciborium::de::Error<io::Error>>
@@ -119,8 +129,11 @@ impl NeuralNet
         let mut net = ciborium::de::from_reader::<Self, _>(File::open(filename)
             .map_err(|err| ciborium::de::Error::Io(err))?)?;
 
-        DefaultFields{neurons: net.neurons, gradient_batch: net.gradient_batch} =
-            Self::initialize_defaults(&net.layers);
+        DefaultFields{
+            neurons: net.neurons,
+            previous_gradient: net.previous_gradient,
+            gradient_batch: net.gradient_batch
+        } = Self::initialize_defaults(&net.layers);
 
         Ok(net)
     }
@@ -193,10 +206,19 @@ impl NeuralNet
                     .get_unchecked_mut(neuron).iter_mut().enumerate()
                     .for_each(|(previous, gradient)|
                     {
+                        let previous_gradient = self.previous_gradient.get_unchecked_mut(layer)
+                            .get_unchecked_mut(neuron)
+                            .get_unchecked_mut(previous);
+
+                        let change = (*gradient + *previous_gradient) / samples.len() as f64;
+
                         *self.weights.get_unchecked_mut(layer)
                             .get_unchecked_mut(neuron)
-                            .get_unchecked_mut(previous) -=
-                            *gradient * self.learning_rate;
+                            .get_unchecked_mut(previous) -= change * self.learning_rate;
+
+                        *previous_gradient = *gradient;
+
+                        *gradient = 0.0;
                     });
             }
         }
@@ -253,11 +275,11 @@ impl NeuralNet
                         *inputs.get_unchecked(i_previous)
                     };
 
-                    *neuron_gradient.get_unchecked_mut(i_previous) = deriv * previous;
+                    *neuron_gradient.get_unchecked_mut(i_previous) += deriv * previous;
                 }
 
                 //bias gradient
-                *neuron_gradient.last_mut().unwrap() = deriv;
+                *neuron_gradient.last_mut().unwrap() += deriv;
 
                 //for previous layer's gradient calculation (current gradient)
                 *self.neurons.get_unchecked_mut(layer).get_unchecked_mut(i_neuron) = deriv;
@@ -290,7 +312,8 @@ mod tests
         let mut network = NeuralNet::create(
             &layers,
             TransferFunction::Sigmoid,
-            1.0
+            1.0,
+            0.0
         );
 
         let change = 0.2;
@@ -321,10 +344,9 @@ mod tests
 
                     network.weights[t_l][t_n][t_b] = normal_weight;
 
-                    network.feedforward_inner(&test_input);
-                    network.backpropagate_inner(&test_input, &test_output);
+                    network.backpropagate(&[TrainSample{inputs: test_input, outputs: test_output}]);
 
-                    let deriv = network.gradient_batch[t_l][t_n][t_b];
+                    let deriv = network.previous_gradient[t_l][t_n][t_b];
                     let real_deriv = (left - right) / (2.0 * change);
 
                     print!("(layer: {t_l} neuron: {t_n} previous: {t_b})  ");
